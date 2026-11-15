@@ -21,6 +21,8 @@ from config import (
     AVAILABILITY_KEEP_MONTHS,
     AVAILABILITY_PURGE,
     GPS_ABSENT_IS_RED,
+    GPS_QUERY_REFRESH_MINUTES,
+    GPS_AVAILABILITY_KEY,
     BREAK_END,
     BREAK_START,
     CORS_ALLOWED_ORIGINS,
@@ -52,8 +54,9 @@ from db import (
     list_month_status,
     mark_month_exported,
     record_bd_day,
+    save_gps_samples,
 )
-from gps_metric import GpsCache, gps_error, gps_normal, gps_state
+from gps_metric import GpsCache, gps_error, gps_normal, gps_state, satellite_mode
 from monthly_report import build_monthly_excel, build_monthly_report
 from machine_map import MapWatcher
 from sql_server import connect as sql_connect
@@ -160,7 +163,24 @@ def get_bd_oids():
     return _bd["oids"]
 
 
-GPS = GpsCache(connect=sql_connect)  # nilai GPS dari query_gps.sql; nonaktif bila GPS_METRIC_COLUMN kosong
+SAT_MODE = satellite_mode()  # GPS dinilai dari satelit (query_gps.sql terisi dan GPS_METRIC_COLUMN diisi)
+
+
+def _record_gps_samples(cache) -> None:
+    """Dipanggil tiap data satelit baru (per menit): catat sampel normal/tidak normal untuk availability GPS."""
+    samples = []
+    for oid, info in list(MACHINE_MAP.items()):
+        found, value = cache.get(oid, info.get("Name"))
+        if not found and GPS_ABSENT_IS_RED:
+            found = True
+        if found:
+            samples.append((oid, info.get("Name"), gps_state(value, found) == "ok"))  # normal = hijau
+    if samples:
+        # sampel tiap GPS_QUERY_REFRESH_MINUTES: batas gap harus lebih besar dari jarak sampel (bawaan 180 dtk akan membuang sampel 5 menit)
+        save_gps_samples(samples, max_gap_seconds=max(180, int(GPS_QUERY_REFRESH_MINUTES * 60 * 2)))
+
+
+GPS = GpsCache(connect=sql_connect, on_update=_record_gps_samples)  # data satelit dari query_gps.sql; nonaktif bila tidak diisi
 _bd_recorded: tuple = (None, frozenset())
 
 
@@ -189,12 +209,12 @@ WITH FilteredDelays AS (
         J1.DELAYCATEGORY,
         J1.DELAYCLASS_OID
     FROM
-        [].[dbo].[DELAY] AS P
+        [database].[dbo].[DELAY] AS P
     LEFT JOIN
-        [].[dbo].[DELAYCLASS] AS J1
+        [database].[dbo].[DELAYCLASS] AS J1
         ON P.DELAYCLASS = J1.DELAYCLASS_OID
     LEFT JOIN
-        [].[dbo].[DELAYCATEGORY] AS J3
+        [database].[dbo].[DELAYCATEGORY] AS J3
         ON J1.DELAYCATEGORY = J3.DELAYCATEGORY_OID
     WHERE
         P.STATUS = 3
@@ -203,9 +223,9 @@ MachinesWithGPS AS (
     SELECT DISTINCT
         b.MACHINE_OID
     FROM
-        [].[dbo].[MACHINE_ONBOARD_HARDWARE] AS hw
+        [database].[dbo].[MACHINE_ONBOARD_HARDWARE] AS hw
     INNER JOIN
-        [].[dbo].[MACHINE] AS b
+        [database].[dbo].[MACHINE] AS b
         ON hw.OID = b.MACHINE_OID
     WHERE
         hw.CONFIGURATION_NAME = 'gps'
@@ -218,7 +238,7 @@ SELECT
     d.MACHINE_OID as GPSStatus,
     b.DELAYCLASS_OID
 FROM
-    [].[dbo].MACHINE AS a
+    [database].[dbo].MACHINE AS a
 LEFT JOIN
     FilteredDelays AS b
     ON a.MACHINE_OID = b.MACHINE_OID
@@ -293,9 +313,11 @@ def _enrich_sql_rows(db_rows: list[dict]) -> list[dict]:
                 latest_status.get((oid, device_type, ip_address))
                 if oid is not None and ip_address else None
             )
+            # GPS berbasis satelit: availability tersimpan dengan kunci khusus (bukan IP).
+            avail_ip = GPS_AVAILABILITY_KEY if (device_type == "G" and SAT_MODE) else ip_address
             availability_item = (
-                daily_availability.get((oid, device_type, ip_address))
-                if oid is not None and ip_address else None
+                daily_availability.get((oid, device_type, avail_ip))
+                if oid is not None and avail_ip else None
             )
 
             # Nama field status/fail_mins dipertahankan agar kompatibel dengan UI lama.
@@ -380,7 +402,8 @@ def emit_overall_availability():
     socketio.emit("availability_overall", {
         "date": report["date"],
         "timezone": report["timezone"],
-        "overall": report["overall"],
+        # GPS ditampilkan di samping PLE tetapi tidak ikut "combined" (availability keseluruhan R + D + P).
+        "overall": {**report["overall"], **({"G": report["gps_overall"]} if report.get("gps_overall") else {})},
         "unit_count": report["unit_count"],
         "excluded_count": report["excluded_count"],
         "break": f"{BREAK_START:%H:%M}-{BREAK_END:%H:%M}",

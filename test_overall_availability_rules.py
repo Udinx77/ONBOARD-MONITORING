@@ -1,4 +1,6 @@
 """Regression test: GPS tidak masuk availability overall atau gabungan unit."""
+import os
+os.environ["GPS_METRIC_COLUMN"] = ""  # uji ini memakai mode ping GPS (bukan satelit)
 from datetime import datetime
 from pathlib import Path
 import tempfile

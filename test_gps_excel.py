@@ -4,6 +4,7 @@ from pathlib import Path
 import pandas as pd
 
 tmp = Path(tempfile.mkdtemp())
+os.environ["GPS_METRIC_COLUMN"] = ""   # tes jalur ping GPS lama: mode satelit dimatikan
 os.environ["MACHINE_CACHE_FILE"] = str(tmp / "cache.json")
 sys.path.insert(0, ".")
 import machine_map as mm

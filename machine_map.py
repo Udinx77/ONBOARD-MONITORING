@@ -14,6 +14,7 @@ from typing import Any
 
 import pandas as pd
 
+from gps_metric import satellite_mode
 from config import (
     DEVICE_TYPES,
     EXCEL_FILE,
@@ -84,6 +85,8 @@ def _build(rows: list[dict[str, Any]], source: str, quiet: bool = False):
         machine_info: dict[str, Any] = {"Name": name, **{t: None for t in DEVICE_TYPES}}
 
         for device_type in DEVICE_TYPES:
+            if device_type == "G" and satellite_mode():
+                continue  # GPS dinilai dari jumlah satelit (database MineStar): IP GPS tidak pernah di-ping
             raw_ip = clean_cell(row.get(device_type))
             if raw_ip is None:
                 continue
@@ -284,7 +287,7 @@ class MapWatcher:
         self._last_try = time.monotonic()
         self._mtime = None
         self._raw = None  # baris query terakhir (tanpa IP GPS dari Excel)
-        self._gps_file = GPS_EXCEL_FILE if (self.source == "sql" and GPS_SOURCE == "excel") else None
+        self._gps_file = GPS_EXCEL_FILE if (self.source == "sql" and GPS_SOURCE == "excel" and not satellite_mode()) else None
         self._gps = None  # ({OID: IP}, {NAMA: IP}) terakhir yang berhasil dibaca
         self._gps_mtime = None
         self._gps_checked = False

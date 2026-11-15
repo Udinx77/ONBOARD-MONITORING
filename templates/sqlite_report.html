@@ -110,12 +110,40 @@ tbody tr:nth-child(even){background:#f8fafc}
   <div class="scan-box"><b>Status SQLite:</b> Belum ada scan yang tersimpan.</div>
   {% endif %}
 
+  <h2 style="font-size:16px;margin:0 0 9px">Peringkat availability unit (terendah di urutan pertama)</h2>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>No</th><th>Unit</th>
+          {% for dtype in report.device_types %}<th>{{ {'R':'Radio (R)','D':'Display (D)','P':'PLE (P)','G':'GPS'}[dtype] }}</th>{% endfor %}
+          <th>Rata-rata {{ report.overall_types|join(' + ') }}</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for unit in report.units %}
+        <tr>
+          <td><b>{{ unit.rank }}</b></td>
+          <td>{{ unit.machine_name }}{% if unit.excluded %} <span class="status status-NA" title="Tidak dihitung di availability overall">BD</span>{% endif %}</td>
+          {% for dtype in report.device_types %}
+            {% set v = unit.devices[dtype].availability_pct %}
+            <td class="{% if v is none %}na{% elif v > 90 %}green{% elif v >= 80 %}yellow{% else %}red{% endif %}">{% if v is none %}N/A{% else %}{{ '%.2f'|format(v) }}%{% endif %}</td>
+          {% endfor %}
+          {% set a = unit.unit_availability_pct %}
+          <td class="{% if a is none %}na{% elif a > 90 %}green{% elif a >= 80 %}yellow{% else %}red{% endif %}"><b>{% if a is none %}N/A{% else %}{{ '%.2f'|format(a) }}%{% endif %}</b></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="note">Peringkat 1 = unit dengan availability rata-rata R + D + P terendah. GPS ditampilkan terpisah dan tidak masuk rata-rata. Unit tanpa data berada di urutan terakhir.</p>
+
   <h2 style="font-size:16px;margin:0 0 9px">Rincian status seluruh perangkat R / D / P{% if 'G' in report.device_types %} / GPS{% endif %}</h2>
   <div class="table-wrap">
     <table>
       <thead>
         <tr>
-          <th>OID</th><th>Nama Unit</th><th>Tipe</th><th>IP Address</th><th>Status SQLite</th>
+          <th>No</th><th>OID</th><th>Nama Unit</th><th>Tipe</th><th>IP Address</th><th>Status SQLite</th>
           <th>Packet Loss</th><th>Paket RX/TX</th><th>Average RTT</th><th>Availability</th>
           <th>Uptime (jam)</th><th>Downtime (jam)</th><th>Coverage</th><th>Last Check</th>
         </tr>
@@ -127,6 +155,7 @@ tbody tr:nth-child(even){background:#f8fafc}
           {% set stat = dev.status if dev.status else 'N/A' %}
           {% if dev.availability_pct is none %}{% set avcls='na' %}{% elif dev.availability_pct > 90 %}{% set avcls='green' %}{% elif dev.availability_pct >= 80 %}{% set avcls='yellow' %}{% else %}{% set avcls='red' %}{% endif %}
           <tr>
+            <td>{{ unit.rank }}</td>
             <td>{{ unit.machine_oid }}</td>
             <td>{{ unit.machine_name }}{% if unit.excluded %} <span class="status status-NA" title="Tidak dihitung di availability overall">BD</span>{% endif %}</td>
             <td><b>{{ dtype }}</b></td>

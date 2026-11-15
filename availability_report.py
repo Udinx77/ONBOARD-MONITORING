@@ -6,7 +6,8 @@ from typing import Any
 from xml.sax.saxutils import escape
 from zoneinfo import ZoneInfo
 
-from config import DB_FILE, DEVICE_NAMES, DEVICE_TYPES, OVERALL_DEVICE_TYPES, TIMEZONE_NAME
+from config import DB_FILE, DEVICE_NAMES, DEVICE_TYPES, GPS_AVAILABILITY_KEY, OVERALL_DEVICE_TYPES, TIMEZONE_NAME
+from gps_metric import satellite_mode
 from db import counted_seconds_in_day, get_daily_availability_map, get_latest_status_map, get_latest_scan
 
 LOCAL_TZ = ZoneInfo(TIMEZONE_NAME)
@@ -85,7 +86,8 @@ def build_availability_report(
 
     # Semua tipe yang benar-benar dikonfigurasi ditampilkan dalam rincian perangkat.
     # Availability overall/gabungan unit hanya memakai R/D/P; GPS tetap menjadi rincian.
-    types = tuple(t for t in DEVICE_TYPES if any(m.get(t) for m in machine_map.values()))
+    sat_mode = satellite_mode()  # GPS berbasis satelit: semua unit punya perangkat G dengan kunci khusus, bukan IP
+    types = tuple(t for t in DEVICE_TYPES if any(m.get(t) for m in machine_map.values()) or (t == "G" and sat_mode and machine_map))
     overall_types = tuple(
         t for t in OVERALL_DEVICE_TYPES if any(m.get(t) for m in machine_map.values())
     )
@@ -107,6 +109,7 @@ def build_availability_report(
         for key in overall_types
     }
 
+    gps_agg = {"target_count": 0, "devices_with_data": 0, "uptime_seconds": 0.0, "downtime_seconds": 0.0, "observed_seconds": 0.0}
     unit_rows: list[dict[str, Any]] = []
     for oid, machine in sorted(machine_map.items(), key=lambda pair: (str(pair[1].get("Name", "")), pair[0])):
         name = str(machine.get("Name") or f"OID-{oid}")
@@ -116,11 +119,17 @@ def build_availability_report(
         excluded = oid in exclude_oids
 
         for device_type in types:
-            ip_address = machine.get(device_type)
+            ip_address = GPS_AVAILABILITY_KEY if (device_type == "G" and sat_mode) else machine.get(device_type)
             metric = _device_metrics(oid, device_type, ip_address, availability_map, latest_status_map, period_seconds)
             devices[device_type] = metric
 
             # GPS diproses dan disimpan sebagai rincian, tetapi tidak dijumlahkan ke total R/D/P.
+            if device_type == "G" and ip_address and not excluded:
+                gps_agg["target_count"] += 1
+                gps_agg["devices_with_data"] += 1 if metric["observed_seconds"] > 0 else 0
+                gps_agg["uptime_seconds"] += metric["uptime_seconds"]
+                gps_agg["downtime_seconds"] += metric["downtime_seconds"]
+                gps_agg["observed_seconds"] += metric["observed_seconds"]
             if device_type not in overall_types:
                 continue
 
@@ -153,6 +162,17 @@ def build_availability_report(
             "configured_device_count": configured_device_count,
             "excluded": excluded,
         })
+
+    # Peringkat: availability unit (R+D+P) terendah di urutan pertama; unit tanpa data di urutan terakhir.
+    # Seri diurutkan dari perangkat terburuk unit itu, lalu nama.
+    def _rank_key(u: dict[str, Any]) -> tuple:
+        values = [u["devices"][t]["availability_pct"] for t in overall_types if u["devices"][t]["availability_pct"] is not None]
+        avail = u["unit_availability_pct"]
+        return (avail is None, avail if avail is not None else 0.0, min(values) if values else 0.0, str(u["machine_name"]))
+
+    unit_rows.sort(key=_rank_key)
+    for number, u in enumerate(unit_rows, start=1):
+        u["rank"] = number
 
     overall_by_type: dict[str, dict[str, Any]] = {}
     for device_type in overall_types:
@@ -189,6 +209,19 @@ def build_availability_report(
         "coverage_pct": _coverage(total_observed, total_expected),
     }
 
+    # Availability GPS seluruh unit (tanpa unit Breakdown): ditampilkan terpisah, TIDAK masuk overall/combined R + D + P.
+    gps_overall = None
+    if gps_agg["target_count"]:
+        expected = period_seconds * gps_agg["target_count"]
+        gps_overall = {
+            **gps_agg,
+            "target_count": int(gps_agg["target_count"]),
+            "devices_with_data": int(gps_agg["devices_with_data"]),
+            "expected_seconds": expected,
+            "availability_pct": _availability(gps_agg["uptime_seconds"], gps_agg["observed_seconds"]),
+            "coverage_pct": _coverage(gps_agg["observed_seconds"], expected),
+        }
+
     scan_info = None
     if latest_scan:
         scan_info = dict(latest_scan)
@@ -212,6 +245,7 @@ def build_availability_report(
         "latest_status_count": len(latest_status_map),
         "latest_scan": scan_info,
         "overall": {**overall_by_type, "combined": overall_combined},
+        "gps_overall": gps_overall,  # terpisah dari "overall": GPS tidak digabung ke availability keseluruhan
         "units": unit_rows,
     }
 
@@ -337,14 +371,14 @@ def build_excel_workbook(report: dict[str, Any]):
         summary.row_dimensions[r].height = 30
 
     # Rincian per unit: OID, Nama, lalu 5 kolom per tipe (IP, Availability, Uptime, Downtime, Coverage), lalu total unit.
-    detail_headers = ["OID", "Nama Unit"]
+    detail_headers = ["No", "OID", "Nama Unit"]  # No = peringkat (availability terendah = 1)
     for t in types:
         detail_headers += [f"IP {t}", f"Availability {t} (%)", f"Uptime {t} (jam)", f"Downtime {t} (jam)", f"Coverage {t} (%)"]
     detail_headers += [f"Availability Unit {'+'.join(overall_types)} (%)", f"Coverage Unit {'+'.join(overall_types)} (%)"]
     details.append(detail_headers)
     style_header(details, 1, 1, len(detail_headers))
     for unit in report["units"]:
-        row = [unit["machine_oid"], unit["machine_name"] + (" (BD)" if unit["excluded"] else "")]
+        row = [unit["rank"], unit["machine_oid"], unit["machine_name"] + (" (BD)" if unit["excluded"] else "")]
         for t in types:
             d = unit["devices"][t]
             row += [
@@ -359,22 +393,23 @@ def build_excel_workbook(report: dict[str, Any]):
         details.append(row)
     last_detail = max(1, details.max_row)
     style_data(details, 2, last_detail, 1, len(detail_headers))
-    details.freeze_panes = "C2"
+    details.freeze_panes = "D2"
     details.auto_filter.ref = f"A1:{get_column_letter(len(detail_headers))}{last_detail}"
-    details.column_dimensions["A"].width = 13
-    details.column_dimensions["B"].width = 19
-    for col in range(3, len(detail_headers) + 1):
+    details.column_dimensions["A"].width = 6
+    details.column_dimensions["B"].width = 13
+    details.column_dimensions["C"].width = 19
+    for col in range(4, len(detail_headers) + 1):
         details.column_dimensions[get_column_letter(col)].width = 18
     detail_pct_cols = []
     for i in range(n):
-        base = 3 + 5 * i
+        base = 4 + 5 * i
         details.column_dimensions[get_column_letter(base)].width = 16
         detail_pct_cols += [base + 1, base + 4]
-    detail_pct_cols += [3 + 5 * n, 4 + 5 * n]
-    for col in [3 + 5 * i + 1 for i in range(n)] + [3 + 5 * n]:
+    detail_pct_cols += [4 + 5 * n, 5 + 5 * n]
+    for col in [4 + 5 * i + 1 for i in range(n)] + [4 + 5 * n]:
         add_availability_cf(details, col, 2, last_detail)
 
-    unit_headers = ["OID", "Nama Unit"] + [f"Availability {t} (%)" for t in types] + [
+    unit_headers = ["No", "OID", "Nama Unit"] + [f"Availability {t} (%)" for t in types] + [
         f"Availability Gabungan {'+'.join(overall_types)} (%)",
         f"Coverage Gabungan {'+'.join(overall_types)} (%)",
         f"Uptime Gabungan {'+'.join(overall_types)} (jam)",
@@ -385,7 +420,7 @@ def build_excel_workbook(report: dict[str, Any]):
     for unit in report["units"]:
         devices = unit["devices"]
         unit_summary.append([
-            unit["machine_oid"], unit["machine_name"] + (" (BD)" if unit["excluded"] else ""),
+            unit["rank"], unit["machine_oid"], unit["machine_name"] + (" (BD)" if unit["excluded"] else ""),
             *[round(devices[t]["availability_pct"], 2) if devices[t]["availability_pct"] is not None else None for t in types],
             round(unit["unit_availability_pct"], 2) if unit["unit_availability_pct"] is not None else None,
             round(unit["unit_coverage_pct"], 2),
@@ -395,13 +430,13 @@ def build_excel_workbook(report: dict[str, Any]):
         ])
     last_unit = max(1, unit_summary.max_row)
     style_data(unit_summary, 2, last_unit, 1, len(unit_headers))
-    unit_summary.freeze_panes = "C2"
+    unit_summary.freeze_panes = "D2"
     unit_summary.auto_filter.ref = f"A1:{get_column_letter(len(unit_headers))}{last_unit}"
     for col in range(1, len(unit_headers) + 1):
-        unit_summary.column_dimensions[get_column_letter(col)].width = 13 if col == 1 else 20 if col <= 2 + n else 23
-    for col in range(3, 4 + n):
+        unit_summary.column_dimensions[get_column_letter(col)].width = 6 if col == 1 else 13 if col == 2 else 20 if col <= 3 + n else 23
+    for col in range(4, 5 + n):
         add_availability_cf(unit_summary, col, 2, last_unit)
-    unit_pct_cols = list(range(3, 5 + n))
+    unit_pct_cols = list(range(4, 6 + n))
 
     # Number formats: values are stored as 0-100, not fractions.
     for ws, cols, first, last in [
@@ -583,7 +618,7 @@ def build_pdf_report(report: dict[str, Any]):
             row_index = len(table_data)
             table_data.append([
                 str(unit["machine_oid"]),
-                Paragraph(escape(str(unit["machine_name"])) + (" (BD)" if unit["excluded"] else ""), styles["CellSmall"]),
+                Paragraph(f'{unit["rank"]}. ' + escape(str(unit["machine_name"])) + (" (BD)" if unit["excluded"] else ""), styles["CellSmall"]),
                 device_type,
                 dev["ip_address"] or "-",
                 dev["status"],

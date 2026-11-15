@@ -51,7 +51,7 @@ TIMEZONE_NAME = os.getenv("TIMEZONE_NAME", "Asia/Makassar")
 
 # Pengaturan SQL Server. Server default dipertahankan dari script awal.
 SQL_DRIVER = os.getenv("SQL_DRIVER", "ODBC Driver 17 for SQL Server")
-SQL_SERVER = os.getenv("SQL_SERVER", "")
+SQL_SERVER = os.getenv("SQL_SERVER", "10.4.17.13")
 SQL_DATABASE = os.getenv("SQL_DATABASE", "")
 SQL_USERNAME = os.getenv("SQL_USERNAME", "")
 SQL_PASSWORD = os.getenv("SQL_PASSWORD", "")
@@ -63,7 +63,7 @@ SQL_TRUST_SERVER_CERTIFICATE = os.getenv("SQL_TRUST_SERVER_CERTIFICATE", "yes")
 SQL_CONNECTION_TIMEOUT = int(os.getenv("SQL_CONNECTION_TIMEOUT", "10"))
 
 # Interval refresh SQL Server/dashboard. Nilai 10 detik mengikuti script awal.
-SQL_REFRESH_SECONDS = int(os.getenv("SQL_REFRESH_SECONDS", "10"))
+SQL_REFRESH_SECONDS = int(os.getenv("SQL_REFRESH_SECONDS", "30"))   # siklus dashboard: query SQL Server + kirim data ke browser
 FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
 FLASK_PORT = int(os.getenv("FLASK_PORT", "5001"))
 FLASK_SECRET_KEY = os.getenv("FLASK_SECRET_KEY") or secrets.token_hex(32)  # kosong -> acak tiap start
@@ -84,18 +84,20 @@ MACHINE_QUERY_FILE = Path(os.getenv("MACHINE_QUERY_FILE", str(BASE_DIR / "query_
 MACHINE_REFRESH_MINUTES = float(os.getenv("MACHINE_REFRESH_MINUTES", "10"))
 MACHINE_CACHE_FILE = Path(os.getenv("MACHINE_CACHE_FILE", str(BASE_DIR / "machine_map_cache.json")))
 # IP GPS tidak ada di database: dibaca dari Excel (kolom OID/Name + GPS atau G) lalu digabung ke hasil query SQL. "none" = GPS tidak dipantau.
-GPS_SOURCE = os.getenv("GPS_SOURCE", "excel").strip().lower()
+GPS_SOURCE = os.getenv("GPS_SOURCE", "none").strip().lower()   # "excel" hanya dipakai bila GPS TIDAK dinilai dari satelit; mode satelit tidak pernah ping GPS
 
 # Jumlah satelit GPS dari query SQL (query_gps.sql; kolom OID, nama truk, Satellites; data per menit, nilai terbaru dipakai).
-# Lampu G: NULL atau < GPS_YELLOW_MIN merah, GPS_YELLOW_MIN sampai < GPS_GREEN_MIN kuning (13-14), >= GPS_GREEN_MIN hijau (15 ke atas).
+# Lampu G: NULL atau < GPS_RED_BELOW merah (di bawah 12), sampai GPS_YELLOW_MAX kuning (12-13), di atasnya hijau (13.1 ke atas).
+# Hijau = GPS normal; kuning dan merah = GPS error (tidak normal).
 GPS_QUERY_FILE = Path(os.getenv("GPS_QUERY_FILE", str(BASE_DIR / "query_gps.sql")))
 GPS_METRIC_COLUMN = os.getenv("GPS_METRIC_COLUMN", "Satellites").strip()          # kolom nilai pada hasil query (kosong = nonaktif)
 GPS_METRIC_AGGREGATE = os.getenv("GPS_METRIC_AGGREGATE", "last").strip().lower()  # last (baris terbaru), avg, min, max, sum
-GPS_GREEN_MIN = float(os.getenv("GPS_GREEN_MIN", "15"))
-GPS_YELLOW_MIN = float(os.getenv("GPS_YELLOW_MIN", "13"))
+GPS_RED_BELOW = float(os.getenv("GPS_RED_BELOW", "12"))
+GPS_YELLOW_MAX = float(os.getenv("GPS_YELLOW_MAX", "13"))
+GPS_AVAILABILITY_KEY = "GPS-SAT"  # pengganti IP pada availability_daily untuk availability GPS berbasis satelit
 GPS_ABSENT_IS_RED = os.getenv("GPS_ABSENT_IS_RED", "false").strip().lower() in {"1", "true", "yes", "on"}   # unit tidak ada di hasil query: merah (true) atau ikut ping (false)
-GPS_QUERY_WINDOW_MINUTES = float(os.getenv("GPS_QUERY_WINDOW_MINUTES", "1"))      # jendela data PositionReport; unit tanpa data di jendela ini = NULL = merah
-GPS_QUERY_REFRESH_MINUTES = float(os.getenv("GPS_QUERY_REFRESH_MINUTES", "1"))    # data per menit
+GPS_QUERY_WINDOW_MINUTES = float(os.getenv("GPS_QUERY_WINDOW_MINUTES", "5"))      # jendela data PositionReport; samakan dengan GPS_QUERY_REFRESH_MINUTES; unit tanpa data di jendela ini = NULL = merah
+GPS_QUERY_REFRESH_MINUTES = float(os.getenv("GPS_QUERY_REFRESH_MINUTES", "5"))    # data satelit diambil tiap 5 menit
 
 # Retensi bulanan: data availability bulan yang SUDAH diekspor dan lebih tua dari N bulan terakhir dihapus otomatis.
 # Bulan yang belum diekspor tidak pernah dihapus.

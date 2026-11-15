@@ -1,9 +1,7 @@
 """Jumlah satelit GPS per unit dari query SQL (query_gps.sql) dan aturan warna lampu G.
 
-Aturan baru: satelit >= 13 = hijau, < 13 (termasuk NULL) = merah. Kuning ditiadakan.
-Sistem TIDAK mem-ping IP GPS: parameter G sepenuhnya ditentukan oleh jumlah satelit ini.
-Data diambil per menit.
-Aturan bisa diubah lagi: ubah query_gps.sql (sumber), GPS_METRIC_COLUMN (kolom nilai), atau GPS_GREEN_MIN di .env.
+Aturan: Satellites NULL atau < 12 merah, 12-13 kuning, 13.1 ke atas hijau. Hijau = GPS normal; kuning dan merah = GPS error. Data diambil tiap GPS_QUERY_REFRESH_MINUTES (bawaan 5 menit).
+Aturan GPS bisa berubah lagi: ubah query_gps.sql (sumber), GPS_METRIC_COLUMN (kolom nilai), atau ambang (GPS_RED_BELOW, GPS_YELLOW_MAX) di .env.
 Cek isi query dari terminal: python gps_metric.py
 """
 from __future__ import annotations
@@ -15,12 +13,13 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from config import (
-    GPS_GREEN_MIN,
     GPS_METRIC_AGGREGATE,
     GPS_METRIC_COLUMN,
     GPS_QUERY_FILE,
     GPS_QUERY_REFRESH_MINUTES,
     GPS_QUERY_WINDOW_MINUTES,
+    GPS_RED_BELOW,
+    GPS_YELLOW_MAX,
 )
 
 LOGGER = logging.getLogger("gps_metric")
@@ -128,41 +127,50 @@ def fetch_gps_values(connect=None, query_file=None, window_minutes: float | None
     return by_oid, by_name
 
 
-def gps_state(value: float | None, found: bool = True, green_min: float | None = None, yellow_min: float | None = None) -> str | None:
-    """GPS baru: hijau jika satelit >=13, merah jika <13, merah jika NULL, None jika unit tidak ada datanya.
-    Kuning (13-14) dianggap merah karena jadi hijau/umur 13+ saja."""
+def gps_state(value: float | None, found: bool = True, red_below: float | None = None, yellow_max: float | None = None) -> str | None:
+    """Warna lampu G dari jumlah satelit: 'crit' merah (NULL atau < red_below, di bawah 12), 'warn' kuning (sampai yellow_max, 12-13),
+    'ok' hijau (di atasnya, 13.1 ke atas). None bila unit tidak ada datanya."""
     if not found:
         return None
     if value is None:
         return "crit"
-    green = 13.0 if green_min is None else green_min
-    return "ok" if value >= green else "crit"
+    red = GPS_RED_BELOW if red_below is None else red_below
+    yellow = GPS_YELLOW_MAX if yellow_max is None else yellow_max
+    return "crit" if value < red else "warn" if value <= yellow else "ok"
 
 
 def gps_normal(found: bool, value: float | None, has_ip: bool, ping_status: str | None) -> bool | None:
-    """GPS normal untuk filter dashboard: ada data satelit -> hijau berarti normal; tanpa data -> ping GPS Green atau Yellow; selain itu None."""
+    """GPS normal untuk filter dashboard = lampu G hijau. Ada data satelit: satelit 13.1 ke atas. Tanpa data satelit: ping GPS Green. None = tidak bisa dinilai."""
     state = gps_state(value, found)
     if state is not None:
         return state == "ok"
-    if has_ip:
-        return ping_status in ("Green", "Yellow")
+    if has_ip and ping_status in ("Green", "Yellow", "Orange", "Red"):
+        return ping_status == "Green"
     return None
 
 
 def gps_error(found: bool, value: float | None, has_ip: bool, ping_status: str | None) -> bool | None:
-    """GPS error = lampu G merah: satelit NULL atau kurang dari 13; tanpa data satelit, ping GPS Red (RTO). Kuning bukan error."""
-    if not found:
-        return None
-    if value is None:
-        return True
-    return value < 13.0
+    """GPS error = tidak normal: lampu G kuning atau merah. Tanpa data satelit: ping GPS Yellow, Orange, atau Red. None = tidak bisa dinilai."""
+    normal = gps_normal(found, value, has_ip, ping_status)
+    return None if normal is None else not normal
+
+
+def satellite_mode(column: str | None = None, query_file=None) -> bool:
+    """True bila GPS dinilai dari satelit: GPS_METRIC_COLUMN terisi dan query_gps.sql berisi query. Dipakai dashboard dan collector."""
+    col = GPS_METRIC_COLUMN if column is None else column
+    path = query_file or GPS_QUERY_FILE
+    try:
+        return bool(col) and _has_sql(path.read_text(encoding="utf-8-sig"))
+    except OSError:
+        return False
 
 
 class GpsCache:
     """Menyimpan data satelit terakhir; diperbarui di thread terpisah supaya dashboard tidak menunggu query."""
 
-    def __init__(self, connect=None, column: str | None = None, query_file=None):
+    def __init__(self, connect=None, column: str | None = None, query_file=None, on_update=None):
         self._connect = connect
+        self._on_update = on_update
         self._query_file = query_file
         self.column = GPS_METRIC_COLUMN if column is None else column
         self.by_oid: dict[int, float | None] = {}
@@ -173,13 +181,8 @@ class GpsCache:
         self._busy = False
         self._next = 0.0
         self._lock = threading.Lock()
-        path = query_file or GPS_QUERY_FILE
-        try:
-            has_query = _has_sql(path.read_text(encoding="utf-8-sig"))
-        except OSError:
-            has_query = False
-        self.enabled = bool(self.column) and has_query
-        if self.column and not has_query:
+        self.enabled = satellite_mode(self.column, query_file)
+        if self.column and not self.enabled:
             LOGGER.info("query_gps.sql belum berisi query; lampu G memakai ping GPS.")
 
     def get(self, oid: int | None, name: str | None) -> tuple[bool, float | None]:
@@ -210,6 +213,11 @@ class GpsCache:
             if self.ok is not True:
                 LOGGER.info("Data satelit GPS dimuat: %s unit (kolom '%s').", len(self.by_name) or len(self.by_oid), self.column)
             self.ok = True
+            if self._on_update is not None:
+                try:
+                    self._on_update(self)  # mis. mencatat sampel availability GPS
+                except Exception:
+                    LOGGER.exception("Callback data GPS gagal.")
             self._next = started + GPS_QUERY_REFRESH_MINUTES * 60  # kadensi tetap dari awal query: jendela 1 menit tidak punya celah
         except Exception as exc:
             if self.ok is not False:

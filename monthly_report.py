@@ -127,6 +127,14 @@ def build_monthly_report(month: str, machine_map: dict | None = None, db_path=DB
             "unit_availability_pct": _pct(u_up, u_obs), "unit_coverage_pct": _cov(u_obs, u_exp),
             "bd_days": sum(1 for (d, o) in bd_days if o == oid), "observed_days": len(observed_days),
         })
+    # Peringkat: availability unit (R+D+P) terendah di urutan pertama; unit tanpa data terakhir; seri: perangkat terburuk lalu nama.
+    def _rank_key(u):
+        vals = [d["availability_pct"] for t, d in u["devices"].items() if t in overall_types and d["availability_pct"] is not None]
+        a = u["unit_availability_pct"]
+        return (a is None, a if a is not None else 0.0, min(vals) if vals else 0.0, u["name"])
+    units.sort(key=_rank_key)
+    for number, u in enumerate(units, start=1):
+        u["rank"] = number
 
     daily = []
     for day in days:
@@ -219,13 +227,13 @@ def build_monthly_excel(report: dict[str, Any]) -> BytesIO:
         summary.column_dimensions[get_column_letter(col)].width = 18
 
     # ---- Per Unit
-    labels = ["OID", "Nama Unit"]
+    labels = ["No", "OID", "Nama Unit"]  # No = peringkat (availability terendah = 1)
     for t in types:
         labels += [f"Availability {DEVICE_NAMES[t]} (%)", f"Downtime {DEVICE_NAMES[t]} (jam)"]
     labels += [f"Availability Unit {'+'.join(overall_types)} (%)", "Coverage Unit (%)", "Hari terpantau", "Hari BD"]
     header(units_ws, 1, labels)
     for i, u in enumerate(report["units"], start=2):
-        values: list[Any] = [u["oid"], u["name"]]
+        values: list[Any] = [u["rank"], u["oid"], u["name"]]
         for t in types:
             d = u["devices"][t]
             values += [None if d["availability_pct"] is None else round(d["availability_pct"], 2), hours(d["downtime_seconds"])]
@@ -235,17 +243,18 @@ def build_monthly_excel(report: dict[str, Any]) -> BytesIO:
             units_ws.cell(i, col, v)
     last_u = max(1, len(report["units"]) + 1)
     style_body(units_ws, 2, last_u, len(labels))
-    pct_cols = [3 + 2 * i for i in range(len(types))] + [3 + 2 * len(types), 4 + 2 * len(types)]
+    pct_cols = [4 + 2 * i for i in range(len(types))] + [4 + 2 * len(types), 5 + 2 * len(types)]
     for r in range(2, last_u + 1):
         for col in pct_cols:
             units_ws.cell(r, col).number_format = '0.00"%"'
-    for col in [3 + 2 * i for i in range(len(types))] + [3 + 2 * len(types)]:
+    for col in [4 + 2 * i for i in range(len(types))] + [4 + 2 * len(types)]:
         colorize(units_ws, col, 2, last_u)
-    units_ws.freeze_panes = "C2"
+    units_ws.freeze_panes = "D2"
     units_ws.auto_filter.ref = f"A1:{get_column_letter(len(labels))}{last_u}"
-    units_ws.column_dimensions["A"].width = 13
-    units_ws.column_dimensions["B"].width = 14
-    for col in range(3, len(labels) + 1):
+    units_ws.column_dimensions["A"].width = 6
+    units_ws.column_dimensions["B"].width = 13
+    units_ws.column_dimensions["C"].width = 14
+    for col in range(4, len(labels) + 1):
         units_ws.column_dimensions[get_column_letter(col)].width = 17
 
     # ---- Harian

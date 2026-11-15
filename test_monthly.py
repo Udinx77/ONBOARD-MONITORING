@@ -45,7 +45,7 @@ import openpyxl
 wb = openpyxl.load_workbook(xls)
 assert wb.sheetnames == ["Ringkasan", "Per Unit", "Harian"]
 assert all(c.data_type != "f" for ws in wb for row in ws.iter_rows() for c in row), "nama berawalan = harus teks"
-assert "=EVIL" in [c.value for c in wb["Per Unit"]["B"]]
+assert "=EVIL" in [c.value for c in wb["Per Unit"]["C"]]
 
 for bad in ("2026-13", "oktober", "", "2026-12"):                               # format salah / bulan belum dimulai
     try:

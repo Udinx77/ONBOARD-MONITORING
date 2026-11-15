@@ -29,6 +29,7 @@ from config import (
     SCAN_INTERVAL_SECONDS,
     TRY_PRIVILEGED_ICMP_FIRST,
 )
+from gps_metric import satellite_mode
 from db import cleanup_old_history, initialize_db, purge_exported_months, record_failed_scan, save_scan_results
 from machine_map import MapWatcher
 
@@ -190,6 +191,8 @@ async def run_collector() -> None:
                 failure_threshold_percent=FAILURE_LOSS_THRESHOLD_PERCENT,
                 red_after_minutes=RED_AFTER_MINUTES,
                 max_observation_gap_seconds=MAX_OBSERVATION_GAP_SECONDS,
+                # GPS berbasis satelit: availability G dihitung dari sampel satelit (dashboard), bukan dari ping.
+                skip_availability_types=("G",) if satellite_mode() else (),
             )
 
             duration = loop.time() - cycle_start_mono

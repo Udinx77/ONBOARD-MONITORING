@@ -8,6 +8,7 @@ import pandas as pd
 tmp = Path(tempfile.mkdtemp())
 os.environ["DB_FILE"] = str(tmp / "t.db")
 os.environ["EXCEL_FILE"] = str(tmp / "map.xlsx")
+os.environ["GPS_METRIC_COLUMN"] = ""   # tes jalur ping GPS lama: mode satelit dimatikan
 os.environ["MACHINE_SOURCE"] = "excel"                  # tes ini memakai Excel sebagai sumber mapping
 sys.modules.setdefault("pyodbc", types.SimpleNamespace(Error=Exception, connect=None))  # SQL Server tidak diperlukan di tes
 rows = [["CT1", 1, "10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"],

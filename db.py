@@ -11,6 +11,7 @@ from config import (
     BREAK_END,
     BREAK_START,
     DB_FILE,
+    GPS_AVAILABILITY_KEY,
     MAX_OBSERVATION_GAP_SECONDS,
     TIMEZONE_NAME,
 )
@@ -133,6 +134,12 @@ def initialize_db(db_path: str | Path = DB_FILE) -> None:
                 PRIMARY KEY(local_date, machine_oid)
             );
 
+            CREATE TABLE IF NOT EXISTS gps_state (
+                machine_oid INTEGER PRIMARY KEY,
+                last_ts REAL NOT NULL,
+                last_normal INTEGER NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS monthly_exports (
                 month TEXT PRIMARY KEY,
                 exported_at REAL NOT NULL,
@@ -244,8 +251,13 @@ def save_scan_results(
     red_after_minutes: int,
     max_observation_gap_seconds: int = MAX_OBSERVATION_GAP_SECONDS,
     db_path: str | Path = DB_FILE,
+    skip_availability_types: tuple[str, ...] = (),
 ) -> int:
-    """Simpan satu siklus hasil ping secara atomik dan perbarui summary availability."""
+    """Simpan satu siklus hasil ping secara atomik dan perbarui summary availability.
+
+    skip_availability_types: tipe yang status pingnya tetap disimpan tetapi availability-nya tidak dihitung dari ping
+    (GPS berbasis satelit memakai save_gps_samples).
+    """
     conn = connect_db(db_path)
     try:
         with conn:
@@ -309,7 +321,7 @@ def save_scan_results(
 
                     # Status sampel sebelumnya dianggap berlaku hingga sampel baru,
                     # hanya jika jedanya masih dalam batas pengamatan yang valid.
-                    if 0 < gap_seconds <= max_observation_gap_seconds:
+                    if 0 < gap_seconds <= max_observation_gap_seconds and device_type not in skip_availability_types:
                         _split_interval_by_local_day(
                             float(previous["last_checked_at"]), finished_at,
                             oid, machine_name, device_type, ip_address,
@@ -569,5 +581,38 @@ def purge_exported_months(keep_months: int, db_path: str | Path = DB_FILE, today
             if max(a, 0) or max(b, 0) or max(d, 0):
                 result[month] = {"availability": max(a, 0), "bd": max(b, 0), "downtime": max(d, 0)}
         return result
+    finally:
+        conn.close()
+
+
+def save_gps_samples(samples, now_ts: float | None = None, max_gap_seconds: int = MAX_OBSERVATION_GAP_SECONDS,
+                     db_path: str | Path = DB_FILE) -> int:
+    """Catat sampel GPS (tiap GPS_QUERY_REFRESH_MINUTES): samples = [(machine_oid, nama, normal)]; normal = lampu G hijau.
+
+    Sama seperti ping: status sampel sebelumnya berlaku sampai sampel baru jika jedanya <= max_gap_seconds; selebihnya (mis. dashboard
+    mati) tidak dihitung. Jam istirahat tidak dihitung. Disimpan sebagai tipe G dengan ip_address = GPS_AVAILABILITY_KEY.
+    Return jumlah unit yang intervalnya dihitung.
+    """
+    import time as _time
+    now_ts = _time.time() if now_ts is None else float(now_ts)
+    counted = 0
+    conn = connect_db(db_path)
+    try:
+        with conn:
+            for oid, name, normal in samples:
+                oid = int(oid)
+                previous = conn.execute("SELECT last_ts, last_normal FROM gps_state WHERE machine_oid=?", (oid,)).fetchone()
+                if previous is not None:
+                    gap = now_ts - float(previous["last_ts"])
+                    if 0 < gap <= max_gap_seconds:
+                        _split_interval_by_local_day(float(previous["last_ts"]), now_ts, oid, name, "G", GPS_AVAILABILITY_KEY,
+                                                     bool(previous["last_normal"]), conn)
+                        counted += 1
+                conn.execute(
+                    "INSERT INTO gps_state(machine_oid, last_ts, last_normal) VALUES (?, ?, ?) "
+                    "ON CONFLICT(machine_oid) DO UPDATE SET last_ts=excluded.last_ts, last_normal=excluded.last_normal",
+                    (oid, now_ts, 1 if normal else 0),
+                )
+        return counted
     finally:
         conn.close()

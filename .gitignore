@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.env
+monitoring.db
+monitoring.db-shm
+monitoring.db-wal
+collector.lock
